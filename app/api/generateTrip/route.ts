@@ -1,78 +1,92 @@
-import OpenAI from "openai";
-import { NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod";
 import { PlanTripResponseSchema } from "@/lib/itinerary";
 
-export const runtime = "nodejs";
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
-const GenerateTripRequestSchema = z.object({
+const BodySchema = z.object({
   prompt: z.string().min(5).max(1000),
 });
 
-/**
- * POST /api/generateTrip
- * Body: { prompt: string }
- * Response: { itinerary: { title, destination, days: [{ day, title, activities[] }] } }
- */
-export async function POST(request: Request) {
-  const body = await request.json().catch(() => null);
-  const parsed = GenerateTripRequestSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid request", details: parsed.error.flatten() },
-      { status: 400 },
-    );
-  }
+export async function POST(req: Request) {
+  try {
+    const body = await req.json().catch(() => null);
+    const parsed = BodySchema.safeParse(body);
+    if (!parsed.success) {
+      return Response.json(
+        { error: "Invalid request", details: parsed.error.flatten() },
+        { status: 400 },
+      );
+    }
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "Missing OPENAI_API_KEY" },
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.5-flash",
+      generationConfig: {
+        responseMimeType: "application/json",
+      },
+    });
+
+    const system = [
+      "You are an expert travel planner.",
+      "Return ONLY valid JSON. No markdown, no commentary.",
+      "The JSON must match this TypeScript type:",
+      '{ itinerary: { title: string; destination: string; days: { day: number; title: string; activities: string[] }[] } }',
+      "Generate a day-by-day travel plan with clear, concrete activities.",
+      "Activities must be realistic and tourist-friendly.",
+      "Avoid unsafe or illegal suggestions.",
+    ].join("\n");
+
+    const prompt = `${system}\n\nUser request: ${parsed.data.prompt}`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+
+    if (!text) {
+      return Response.json(
+        { error: "Model response is invalid" },
+        { status: 500 },
+      );
+    }
+
+    let json: unknown;
+    try {
+      let raw = text.trim();
+
+      // If the model wrapped JSON in extra text/markdown, try to slice out the JSON object.
+      if (!raw.startsWith("{") || !raw.endsWith("}")) {
+        const first = raw.indexOf("{");
+        const last = raw.lastIndexOf("}");
+        if (first !== -1 && last !== -1 && last > first) {
+          raw = raw.slice(first, last + 1);
+        }
+      }
+
+      json = JSON.parse(raw);
+    } catch {
+      return Response.json(
+        { error: "Model did not return JSON" },
+        { status: 502 },
+      );
+    }
+
+    const validated = PlanTripResponseSchema.safeParse(json);
+    if (!validated.success) {
+      return Response.json(
+        {
+          error: "Model returned invalid schema",
+          details: validated.error.flatten(),
+        },
+        { status: 502 },
+      );
+    }
+
+    return Response.json(validated.data);
+  } catch (error) {
+    console.error("🚨 Error generating trip:", error);
+    return Response.json(
+      { error: "Trip generation failed" },
       { status: 500 },
     );
   }
-
-  const client = new OpenAI({ apiKey });
-
-  const system = [
-    "You are an expert travel planner.",
-    "Return ONLY valid JSON. No markdown, no commentary.",
-    "The JSON must match this TypeScript type:",
-    '{ itinerary: { title: string; destination: string; days: { day: number; title: string; activities: string[] }[] } }',
-    "Generate a day-by-day travel plan with clear, concrete activities.",
-    "Activities must be realistic and tourist-friendly.",
-    "Avoid unsafe or illegal suggestions.",
-  ].join("\n");
-
-  const completion = await client.chat.completions.create({
-    model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
-    temperature: 0.7,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: `User request: ${parsed.data.prompt}` },
-    ],
-    response_format: { type: "json_object" },
-  });
-
-  const content = completion.choices[0]?.message?.content ?? "";
-  let json: unknown;
-  try {
-    json = JSON.parse(content);
-  } catch {
-    return NextResponse.json(
-      { error: "Model returned non-JSON output" },
-      { status: 502 },
-    );
-  }
-
-  const validated = PlanTripResponseSchema.safeParse(json);
-  if (!validated.success) {
-    return NextResponse.json(
-      { error: "Model returned invalid schema", details: validated.error.flatten() },
-      { status: 502 },
-    );
-  }
-
-  return NextResponse.json(validated.data);
 }
-

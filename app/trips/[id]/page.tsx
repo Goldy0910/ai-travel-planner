@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { ItinerarySchema } from "@/lib/itinerary";
 import { ItineraryView } from "@/components/ItineraryView";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -15,9 +14,10 @@ type TripRow = {
 export default async function TripDetailsPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }) {
-  const supabase = createSupabaseServerClient();
+  const { id } = await params;
+  const supabase = await createSupabaseServerClient();
 
   const { data: userData } = await supabase.auth.getUser();
   if (!userData.user) {
@@ -42,13 +42,42 @@ export default async function TripDetailsPage({
   const { data: trip, error } = await supabase
     .from("trips")
     .select("id,title,prompt,itinerary,created_at")
-    .eq("id", params.id)
+    .eq("id", id)
     .single<TripRow>();
+  if (error) {
+    console.error("Error loading trip", error);
+  }
 
-  if (error || !trip) return notFound();
+  if (!trip) {
+    return (
+      <div className="rounded-2xl border border-zinc-200 bg-white p-6">
+        <h1 className="text-xl font-semibold tracking-tight">Trip not found</h1>
+        <p className="mt-2 text-sm text-zinc-600">
+          We couldn&apos;t find that trip. It may have been deleted.
+        </p>
+        <Link
+          href="/trips"
+          className="mt-4 inline-flex h-10 items-center justify-center rounded-xl bg-zinc-900 px-4 text-sm font-medium text-white"
+        >
+          Back to My Trips
+        </Link>
+      </div>
+    );
+  }
 
-  const itineraryParsed = ItinerarySchema.safeParse(trip.itinerary);
-  if (!itineraryParsed.success) return notFound();
+  // Handle legacy rows where `itinerary` was stored as a JSON string.
+  const itineraryValue: unknown =
+    typeof trip.itinerary === "string"
+      ? (() => {
+          try {
+            return JSON.parse(trip.itinerary);
+          } catch {
+            return trip.itinerary;
+          }
+        })()
+      : trip.itinerary;
+
+  const itineraryParsed = ItinerarySchema.safeParse(itineraryValue);
 
   return (
     <div className="space-y-6">
@@ -68,8 +97,17 @@ export default async function TripDetailsPage({
           </p>
         </div>
       </div>
-
-      <ItineraryView itinerary={itineraryParsed.data} />
+      {itineraryParsed.success ? (
+        <ItineraryView itinerary={itineraryParsed.data} />
+      ) : (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          This trip&apos;s itinerary is stored in an older format. Showing raw
+          data below.
+          <pre className="mt-3 max-h-96 overflow-auto rounded-xl bg-amber-100 p-3 text-xs text-amber-950">
+            {JSON.stringify(trip.itinerary, null, 2)}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
